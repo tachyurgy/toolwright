@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Toolwright — tool contracts checked on both sides of the call</title>
+<style>
+  :root{--bg:#fbfbfc;--ink:#14161b;--muted:#5f6774;--line:#e4e5ea;--card:#fff;
+        --accent:#5a3f8f;--ok:#1d6b4c;--bad:#a13627;
+        --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,monospace;}
+  @media (prefers-color-scheme:dark){
+    :root{--bg:#101116;--ink:#eff0f5;--muted:#959cab;--line:#26272f;--card:#17181e;
+          --accent:#a992e2;--ok:#79c89e;--bad:#e2907c;}}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:15px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}
+  .wrap{max-width:960px;margin:0 auto;padding:38px 20px 80px}
+  header{border-bottom:1px solid var(--line);padding-bottom:20px;margin-bottom:22px}
+  h1{font-size:27px;margin:0 0 6px;letter-spacing:-.02em}
+  .sub{color:var(--muted);margin:0}
+  h2{font-size:13px;text-transform:uppercase;letter-spacing:.09em;color:var(--muted);
+     font-family:var(--mono);margin:26px 0 10px}
+  .cols{display:flex;gap:16px;flex-wrap:wrap}
+  .col{flex:1 1 320px;min-width:0}
+  .tool{background:var(--card);border:1px solid var(--line);border-radius:8px;
+        padding:10px 12px;margin:6px 0;cursor:pointer}
+  .tool:hover{border-color:var(--accent)}
+  .tool.sel{border-color:var(--accent);box-shadow:inset 3px 0 0 var(--accent)}
+  .tool b{font-family:var(--mono);font-size:13px}
+  .tool .d{color:var(--muted);font-size:12.5px;margin-top:2px}
+  textarea{width:100%;min-height:110px;font-family:var(--mono);font-size:12.5px;padding:10px;
+    border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--ink)}
+  button{padding:8px 13px;border:1px solid var(--accent);border-radius:7px;background:var(--accent);
+         color:#fff;cursor:pointer;font:inherit;font-size:13.5px}
+  button.ghost{background:transparent;color:var(--accent)}
+  .row{display:flex;gap:7px;flex-wrap:wrap;margin:9px 0}
+  pre{font-family:var(--mono);font-size:12.5px;background:var(--card);border:1px solid var(--line);
+      border-radius:8px;padding:11px;overflow-x:auto;margin:6px 0 0;white-space:pre-wrap;word-break:break-word}
+  .v{color:var(--bad);font-family:var(--mono);font-size:12.5px;padding:2px 0}
+  .badge{display:inline-block;font-family:var(--mono);font-size:11px;padding:2px 9px;
+         border-radius:999px;border:1px solid var(--line);color:var(--muted)}
+  .badge.in{border-color:var(--bad);color:var(--bad)}
+  .badge.out{border-color:var(--accent);color:var(--accent)}
+  .ok{color:var(--ok);font-weight:600}.bad{color:var(--bad);font-weight:600}
+  .note{color:var(--muted);font-size:13.5px;margin:8px 0 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <h1>Toolwright</h1>
+  <p class="sub">An MCP tool registry that validates arguments on the way in and the tool's own return value on the way out.</p>
+</header>
+
+<div class="cols">
+  <div class="col">
+    <h2>Tools</h2>
+    <div id="tools"></div>
+    <p class="note">The last three are deliberately broken implementations, kept so the outbound check has something to catch.</p>
+  </div>
+  <div class="col">
+    <h2>Call</h2>
+    <textarea id="args"></textarea>
+    <div class="row">
+      <button onclick="callTool()">Call</button>
+      <button class="ghost" onclick="mutate('unknown')">add an undeclared argument</button>
+      <button class="ghost" onclick="mutate('type')">wrong type</button>
+      <button class="ghost" onclick="mutate('missing')">drop a required field</button>
+    </div>
+    <div id="out"></div>
+    <h2>Declared schema</h2>
+    <pre id="schema">—</pre>
+  </div>
+</div>
+</div>
+
+<script>
+const $ = i => document.getElementById(i);
+const esc = s => String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+let TOOLS = [], selected = null;
+
+const SAMPLES = {
+  quote_order: {symbol: "AAPL", quantity: 3, side: "buy"},
+  settlement_date: {traded_on: "2026-08-07"},
+  broken_returns_wrong_type: {symbol: "AAPL"},
+  broken_leaks_a_field: {symbol: "AAPL"},
+  broken_raises: {},
+};
+
+async function load(){
+  TOOLS = (await (await fetch('/api/tools')).json()).tools;
+  $('tools').innerHTML = TOOLS.map(t =>
+    '<div class="tool" data-n="' + esc(t.name) + '" onclick="pick(this.dataset.n)">' +
+    '<b>' + esc(t.name) + '</b><div class="d">' + esc(t.description) + '</div></div>').join('');
+  pick(TOOLS[0].name);
+}
+
+function pick(name){
+  selected = name;
+  document.querySelectorAll('.tool').forEach(e => e.classList.toggle('sel', e.dataset.n === name));
+  $('args').value = JSON.stringify(SAMPLES[name] ?? {}, null, 2);
+  const t = TOOLS.find(x => x.name === name);
+  $('schema').textContent = 'input:\n' + JSON.stringify(t.inputSchema, null, 2) +
+                            '\n\noutput:\n' + JSON.stringify(t.outputSchema, null, 2);
+  $('out').innerHTML = '';
+}
+
+function mutate(kind){
+  let a;
+  try { a = JSON.parse($('args').value); } catch { return; }
+  const keys = Object.keys(a);
+  if (kind === 'unknown') a.undeclared_field = "surprise";
+  if (kind === 'type' && keys.length) a[keys[0]] = {not: "a scalar"};
+  if (kind === 'missing' && keys.length) delete a[keys[0]];
+  $('args').value = JSON.stringify(a, null, 2);
+  callTool();
+}
+
+async function callTool(){
+  let args;
+  try { args = JSON.parse($('args').value); }
+  catch (e){ $('out').innerHTML = '<pre class="bad">arguments are not valid JSON</pre>'; return; }
+
+  const d = await (await fetch('/api/call', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({name: selected, arguments: args})})).json();
+  const r = d.result;
+
+  const vs = r.violations.map(v =>
+    '<div class="v"><span class="badge ' + (v.where === 'arguments' ? 'in' : 'out') + '">' +
+    esc(v.where) + '</span> ' + esc(v.path ? v.path + ': ' : '') + esc(v.message) + '</div>').join('');
+
+  $('out').innerHTML =
+    '<pre>' + (r.ok ? '<span class="ok">accepted</span>' : '<span class="bad">rejected</span>') +
+    (r.error ? '\n\n' + esc(r.error) : '') +
+    (r.ok ? '\n\n' + esc(JSON.stringify(r.value, null, 2)) : '') + '</pre>' +
+    (vs ? '<div style="margin-top:8px">' + vs + '</div>' : '') +
+    '<p class="note">as MCP:</p><pre>' + esc(JSON.stringify(d.mcp, null, 2)) + '</pre>';
+}
+load();
+</script>
+</body>
+</html>
